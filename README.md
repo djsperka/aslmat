@@ -7,4 +7,6 @@ MATLAB mex file for monitoring eye position using the ASL eye tracker.
 > [!NOTE]
 > Need to have boost installed (along with 64 bit libs). Use include folder (folder above boost/*.hpp) and libs folder in mex command.
 
-`mex asl.cpp -ID:\boost\boost_1_82_0 -LD:\boost\boost_1_82_0\lib64-msvc-14.3`
+TODO: REmoved most of boost stuff, as the tcpip communication stuff is way too complicated. Winsock isn't much better.
+
+`mex asl.cpp -ID:\boost\boost_1_82_0`
