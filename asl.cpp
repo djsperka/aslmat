@@ -1,37 +1,63 @@
 #include "mex.hpp"
 #include "mexAdapter.hpp"
-
-// compiler error "Please define _WIN32_WINNT or _WIN32_WINDOWS appropriately."
-// Source - https://stackoverflow.com/a/43832497
-// Posted by Hill
-// Retrieved 2026-09-10, License - CC BY-SA 3.0
-#include <SDKDDKVer.h>
-
-#include <boost/asio.hpp>
-#include <boost/algorithm/string.hpp>
 #include <string>
 #include <iostream>
 #include <sstream>
+#include <boost/algorithm/string.hpp>
+#include <boost/lexical_cast.hpp>
+
+// This define must come before windows.h, otherwise it will include winsock.h, 
+// and that will lead to errors when winsock2 is included. 
+#define _WINSOCKAPI_
+#include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
+
 
 using namespace matlab::data;
 using matlab::mex::ArgumentList;
-using boost::asio::ip::tcp;
 
+// Tell the linker to link against the Winsock library
+#pragma comment(lib, "Ws2_32.lib")
 
 
 
 class MexFunction : public matlab::mex::Function 
 {
 private:
-    boost::asio::io_context m_io_context;
-    boost::asio::ip::tcp::socket m_socket;
+    WSADATA m_wsaData;
+    SOCKET m_connectSocket;
+
     std::shared_ptr<matlab::engine::MATLABEngine> m_matlabPtr;
     ArrayFactory m_factory;
     bool m_connected;
     int m_attempts;
 
 public:
-    MexFunction(): m_socket(m_io_context), m_connected(false), m_matlabPtr(getEngine()), m_attempts(0) {};
+    MexFunction(): m_connectSocket(INVALID_SOCKET), m_connected(false), m_matlabPtr(getEngine()), m_attempts(0) 
+    {
+        // 1. Initialize Winsock
+        int iResult = WSAStartup(MAKEWORD(2, 2), &m_wsaData);
+        if (iResult != 0) 
+        {
+            std::stringstream out;
+            out << "WSAStartup failed with error: " << iResult;
+            m_matlabPtr->feval(u"error", 0,
+                std::vector<Array>({ m_factory.createScalar(out.str())}));
+        }
+
+        // 2. Create a Socket
+        m_connectSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (m_connectSocket == INVALID_SOCKET) {
+            WSACleanup();
+            std::stringstream out;
+            out << "Winsock socket creation failed with error: " << WSAGetLastError();
+            m_matlabPtr->feval(u"error", 0,
+                std::vector<Array>({ m_factory.createScalar(out.str()) }));
+
+}
+    };
     void operator()(ArgumentList outputs, ArgumentList inputs) 
     {
 
@@ -78,8 +104,18 @@ public:
             }
 
             // vAddr[0] is the address
-            // vAddr[1] is the port
-            m_connected = connect(vAddr[0], vAddr[1]);
+            // vAddr[1] is the port - check that it is an int
+            int port = 0;
+            try
+            {
+                port = boost::lexical_cast<int>(vAddr[1]);
+            }
+            catch(boost::bad_lexical_cast &)
+            {
+                m_matlabPtr->feval(u"error", 0,
+                    std::vector<Array>({ m_factory.createScalar("'connect' port must be an integer.") }));
+            }
+            m_connected = connectToASL(vAddr[0], port);
         }
         else if (s == "status")
         {
@@ -87,37 +123,24 @@ public:
             std::cout << "Attempts: " << m_attempts << std::endl;
         }
 
-        // Assign outputs
-        // outputs[0] = 10;
     }
 
-    bool connect(const std::string& addr, const std::string& port)
+    bool connectToASL(const std::string& addr, int port)
     {
-        // Error to not throw exception
-        boost::system::error_code not_throw;
-
-        // Resolve hostname and port
-        boost::asio::ip::tcp::resolver resolver(m_io_context);
-        boost::asio::ip::tcp::resolver::query query(addr, port);
-        boost::asio::ip::tcp::resolver::iterator endpoint = resolver.resolve(query, not_throw);
-        if (not_throw) 
-        {
-            std::stringstream out;
-            out << "Error resolving host(" << not_throw.value() << "): "<< not_throw.message();
+        sockaddr_in clientService;
+        clientService.sin_family = AF_INET;
+        clientService.sin_addr.s_addr = inet_addr("127.0.0.1");
+        clientService.sin_port = htons(8080);
+    
+        // 4. Connect to Server
+        // Note: For production, set timeouts or use non-blocking mode to keep MATLAB responsive
+        int iResult = connect(m_connectSocket, (SOCKADDR*)&clientService, sizeof(clientService));
+        if (iResult == SOCKET_ERROR) {
+            closesocket(m_connectSocket);
+            WSACleanup();
             m_matlabPtr->feval(u"error", 0,
-                    std::vector<Array>({ m_factory.createScalar(out.str()) }));
-        }
-
-        // Socket and connection
-        boost::asio::connect(m_socket, endpoint, not_throw);
-        if (not_throw) 
-        {
-            std::stringstream out;
-            out << "Error connecting(" << not_throw.value() << "): "<< not_throw.message();
-            m_matlabPtr->feval(u"error", 0,
-                    std::vector<Array>({ m_factory.createScalar(out.str()) }));
-        }
+                std::vector<Array>({ m_factory.createScalar("Connecting to server failed.") }));
+        }    
         std::cout << "Connected to host." << std::endl;
-    }
-
+    };
 };
