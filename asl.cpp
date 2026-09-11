@@ -78,8 +78,9 @@ public:
             // connected already?
             if (m_connected)
             {
-                m_matlabPtr->feval(u"error", 0,
-                    std::vector<Array>({ m_factory.createScalar("Cannot 'connect' - already connected") }));
+                merror(std::string("Cannot 'connect' - already connected"));
+//                m_matlabPtr->feval(u"error", 0,
+//                    std::vector<Array>({ m_factory.createScalar("Cannot 'connect' - already connected") }));
             }
 
             // Expecting a string (address:port)
@@ -129,18 +130,72 @@ public:
     {
         sockaddr_in clientService;
         clientService.sin_family = AF_INET;
-        clientService.sin_addr.s_addr = inet_addr("127.0.0.1");
+        //clientService.sin_addr.s_addr = inet_addr("127.0.0.1");
+        InetPton(AF_INET, addr.c_str(), &clientService.sin_addr.s_addr);
         clientService.sin_port = htons(8080);
     
         // 4. Connect to Server
         // Note: For production, set timeouts or use non-blocking mode to keep MATLAB responsive
+        u_long block = 1;
+        ioctlsocket(m_connectSocket, FIONBIO, &block);
         int iResult = connect(m_connectSocket, (SOCKADDR*)&clientService, sizeof(clientService));
-        if (iResult == SOCKET_ERROR) {
-            closesocket(m_connectSocket);
-            WSACleanup();
-            m_matlabPtr->feval(u"error", 0,
-                std::vector<Array>({ m_factory.createScalar("Connecting to server failed.") }));
-        }    
+        if (iResult == SOCKET_ERROR) 
+        {
+            if (WSAGetLastError() != WSAEWOULDBLOCK) 
+            {
+                closesocket(m_connectSocket);
+                WSACleanup();
+                merror("Connecting to server failed.");
+            }
+            else
+            {
+                // 3. Use select() to implement the timeout
+                fd_set setW, setE;
+                FD_ZERO(&setW); FD_SET(m_connectSocket, &setW);
+                FD_ZERO(&setE); FD_SET(m_connectSocket, &setE);
+
+                timeval time_out;
+                time_out.tv_sec = 5;  // 5-second timeout
+                time_out.tv_usec = 0;
+
+                int ret = select(0, NULL, &setW, &setE, &time_out);
+                if (ret <= 0) 
+                {
+                    // ret == 0 means timeout elapsed; ret < 0 means select failed
+                    closesocket(m_connectSocket);
+                    if (ret == 0) WSASetLastError(WSAETIMEDOUT);
+                    merror("Timed out connecting to ASL.");
+                }
+
+                // 4. Check if an error occurred on the socket
+                if (FD_ISSET(m_connectSocket, &setE)) 
+                {
+                    int err = 0;
+                    int len = sizeof(err);
+                    getsockopt(m_connectSocket, SOL_SOCKET, SO_ERROR, (char*)&err, &len);
+                    closesocket(m_connectSocket);
+                    WSASetLastError(err);
+                    std::stringstream out;
+                    out << "Error on socket: " << err;
+                    merror(out.str());
+                }
+            }
+        }
+        // 5. Connection succeeded! Return the socket to blocking mode if desired
+        block = 0;
+        ioctlsocket(m_connectSocket, FIONBIO, &block);
         std::cout << "Connected to host." << std::endl;
+    };
+
+    void merror(char *msg)
+    {
+        merror(std::string(msg));
+        return;
+    };
+
+    void merror(std::string& errmsg)
+    {
+        m_matlabPtr->feval(u"error", 0,
+            std::vector<Array>({ m_factory.createScalar(errmsg) }));
     };
 };
