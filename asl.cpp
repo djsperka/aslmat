@@ -3,8 +3,8 @@
 #include <string>
 #include <iostream>
 #include <sstream>
-#include <boost/algorithm/string.hpp>
-#include <boost/lexical_cast.hpp>
+#include <vector>
+#include <iterator>
 
 // This define must come before windows.h, otherwise it will include winsock.h, 
 // and that will lead to errors when winsock2 is included. 
@@ -13,14 +13,30 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
-
-
 using namespace matlab::data;
 using matlab::mex::ArgumentList;
 
 // Tell the linker to link against the Winsock library
 #pragma comment(lib, "Ws2_32.lib")
 
+// Source - https://stackoverflow.com/a/236803
+// Posted by Evan Teran, modified by community. See post 'Timeline' for change history
+// Retrieved 2026-10-06, License - CC BY-SA 4.0
+
+template <typename Out>
+void split(const std::string& s, char delim, Out result) {
+    std::istringstream iss(s);
+    std::string item;
+    while (std::getline(iss, item, delim)) {
+        *result++ = item;
+    }
+}
+
+std::vector<std::string> split(const std::string& s, char delim) {
+    std::vector<std::string> elems;
+    split(s, delim, std::back_inserter(elems));
+    return elems;
+}
 
 
 class MexFunction : public matlab::mex::Function 
@@ -56,8 +72,9 @@ public:
             m_matlabPtr->feval(u"error", 0,
                 std::vector<Array>({ m_factory.createScalar(out.str()) }));
 
-}
+        }
     };
+
     void operator()(ArgumentList outputs, ArgumentList inputs) 
     {
 
@@ -79,44 +96,25 @@ public:
             if (m_connected)
             {
                 merror(std::string("Cannot 'connect' - already connected"));
-//                m_matlabPtr->feval(u"error", 0,
-//                    std::vector<Array>({ m_factory.createScalar("Cannot 'connect' - already connected") }));
             }
 
-            // Expecting a string (address:port)
+            // Expecting a single arg string (address:port)
             if (inputs.size() != 2 || inputs[1].getType() != ArrayType::CHAR)
             {
-                m_matlabPtr->feval(u"error", 0,
-                    std::vector<Array>({ m_factory.createScalar("'connect' requires one additional arg: 'addr:port'") }));
+				merror(std::string("'connect' requires one additional arg: 'addr:port'"));
             }
 
-            // Source - https://stackoverflow.com/a/5734491
-            // Posted by karlphillip, modified by community. See post 'Timeline' for change history
-            // Retrieved 2026-09-10, License - CC BY-SA 4.0
-            
+			// Split address and port, and check that port is an integer
             std::string sAddr = ((matlab::data::CharArray)inputs[1]).toAscii();
-            std::vector<std::string> vAddr;
-            boost::split(vAddr, sAddr, boost::is_any_of(":"));
-
+            std::vector<std::string> vAddr = split(sAddr, ':');
+            size_t port = 0;
             if (vAddr.size() != 2)
             {
-                m_matlabPtr->feval(u"error", 0,
-                    std::vector<Array>({ m_factory.createScalar("'connect' address arg must be in form: 'addr:port'") }));
+                merror(std::string("'connect' address arg must be in form: 'addr:port'"));
             }
 
-            // vAddr[0] is the address
-            // vAddr[1] is the port - check that it is an int
-            int port = 0;
-            try
-            {
-                port = boost::lexical_cast<int>(vAddr[1]);
-            }
-            catch(boost::bad_lexical_cast &)
-            {
-                m_matlabPtr->feval(u"error", 0,
-                    std::vector<Array>({ m_factory.createScalar("'connect' port must be an integer.") }));
-            }
-            m_connected = connectToASL(vAddr[0], port);
+            std::cout << "Connecting to " << vAddr[0] << ":" << vAddr[1] << std::endl;
+            m_connected = connectToASL(vAddr[0], vAddr[1]);
         }
         else if (s == "status")
         {
@@ -125,66 +123,61 @@ public:
         }
 
     }
-
-    bool connectToASL(const std::string& addr, int port)
+    bool connectToASL(const std::string& addr, const std::string& portStr)
     {
-        sockaddr_in clientService;
-        clientService.sin_family = AF_INET;
-        //clientService.sin_addr.s_addr = inet_addr("127.0.0.1");
-        InetPton(AF_INET, addr.c_str(), &clientService.sin_addr.s_addr);
-        clientService.sin_port = htons(8080);
-    
-        // 4. Connect to Server
-        // Note: For production, set timeouts or use non-blocking mode to keep MATLAB responsive
-        u_long block = 1;
-        ioctlsocket(m_connectSocket, FIONBIO, &block);
-        int iResult = connect(m_connectSocket, (SOCKADDR*)&clientService, sizeof(clientService));
-        if (iResult == SOCKET_ERROR) 
-        {
-            if (WSAGetLastError() != WSAEWOULDBLOCK) 
-            {
-                closesocket(m_connectSocket);
-                WSACleanup();
-                merror("Connecting to server failed.");
-            }
-            else
-            {
-                // 3. Use select() to implement the timeout
-                fd_set setW, setE;
-                FD_ZERO(&setW); FD_SET(m_connectSocket, &setW);
-                FD_ZERO(&setE); FD_SET(m_connectSocket, &setE);
-
-                timeval time_out;
-                time_out.tv_sec = 5;  // 5-second timeout
-                time_out.tv_usec = 0;
-
-                int ret = select(0, NULL, &setW, &setE, &time_out);
-                if (ret <= 0) 
-                {
-                    // ret == 0 means timeout elapsed; ret < 0 means select failed
-                    closesocket(m_connectSocket);
-                    if (ret == 0) WSASetLastError(WSAETIMEDOUT);
-                    merror("Timed out connecting to ASL.");
-                }
-
-                // 4. Check if an error occurred on the socket
-                if (FD_ISSET(m_connectSocket, &setE)) 
-                {
-                    int err = 0;
-                    int len = sizeof(err);
-                    getsockopt(m_connectSocket, SOL_SOCKET, SO_ERROR, (char*)&err, &len);
-                    closesocket(m_connectSocket);
-                    WSASetLastError(err);
-                    std::stringstream out;
-                    out << "Error on socket: " << err;
-                    merror(out.str());
-                }
-            }
+        // Close any existing socket created earlier
+        if (m_connectSocket != INVALID_SOCKET) {
+            closesocket(m_connectSocket);
+            m_connectSocket = INVALID_SOCKET;
         }
-        // 5. Connection succeeded! Return the socket to blocking mode if desired
-        block = 0;
-        ioctlsocket(m_connectSocket, FIONBIO, &block);
+
+        struct addrinfo hints;
+        struct addrinfo *result = nullptr, *ptr = nullptr;
+
+        ZeroMemory(&hints, sizeof(hints));
+        hints.ai_family = AF_UNSPEC;      // Allow IPv4 or IPv6
+        hints.ai_socktype = SOCK_STREAM;  // TCP
+        hints.ai_protocol = IPPROTO_TCP;
+
+        int rv = getaddrinfo(addr.c_str(), portStr.c_str(), &hints, &result);
+        if (rv != 0) {
+            std::stringstream out;
+            out << "getaddrinfo failed: " << gai_strerrorA(rv);
+            merror(out.str());
+            return false;
+        }
+
+        for (ptr = result; ptr != nullptr; ptr = ptr->ai_next)
+        {
+            m_connectSocket = socket(ptr->ai_family, ptr->ai_socktype, ptr->ai_protocol);
+            if (m_connectSocket == INVALID_SOCKET) {
+                continue;
+            }
+
+            // Attempt to connect
+            int iResult = connect(m_connectSocket, ptr->ai_addr, (int)ptr->ai_addrlen);
+            if (iResult == SOCKET_ERROR) {
+                closesocket(m_connectSocket);
+                m_connectSocket = INVALID_SOCKET;
+                // try next address
+                continue;
+            }
+
+            // Successfully connected
+            break;
+        }
+
+        freeaddrinfo(result);
+
+        if (m_connectSocket == INVALID_SOCKET) {
+            std::stringstream out;
+            out << "Unable to connect to server. Last error: " << WSAGetLastError();
+            merror(out.str());
+            return false;
+        }
+
         std::cout << "Connected to host." << std::endl;
+        return true;
     };
 
     void merror(char *msg)
