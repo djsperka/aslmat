@@ -29,12 +29,19 @@
 %   Raises an error if not connected, or if no sample has been received
 %   since connecting.
 %
+%   S = ASL('eyepos') returns the most recent eye data sample as a 1x1
+%   struct S, with one field for each of the sample fields listed above.
+%   All values are doubles. Like 'read', it does not wait for new data,
+%   and it raises an error in the same cases.
+%
 %   ASL('disconnect') stops the background thread and closes the
 %   connection. Raises an error if not connected.
 %
 %   Example:
 %       asl('connect', '128.120.140.228:51000');
 %       asl('read');
+%       s = asl('eyepos');
+%       fprintf('gaze = (%g, %g)\n', s.gaze_x, s.gaze_y);
 %       asl('disconnect');
 %
 %   ASL is a MEX function. Build it with:
