@@ -11,6 +11,7 @@ MATLAB mex file for monitoring eye position using the ASL eye tracker.
 ```matlab
 asl('connect', '128.120.140.228:51000');
 asl('read');
+s = asl('eyepos');
 asl('disconnect');
 ```
 
@@ -46,6 +47,12 @@ Raises an error if:
 - no sample has been received since connecting
 
 If the background thread stops because of an error, such as the tracker closing the connection, the module disconnects itself and prints a message giving the reason. `asl('status')` also shows the reason. You can call `asl('connect', ...)` again right away, without calling `asl('disconnect')` first.
+
+### eyepos
+
+`s = asl('eyepos')`
+
+Returns the most recent eye data sample as a 1x1 struct, with one field for each of the sample fields listed under `read`. All values are doubles. Like `read`, it does not wait for new data, and it raises an error in the same cases.
 
 ### disconnect
 
