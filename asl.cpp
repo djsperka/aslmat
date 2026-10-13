@@ -76,6 +76,9 @@ private:
     std::thread m_readerThread;
     std::atomic<bool> m_stopReader;
     std::atomic<bool> m_readerFailed;   // set by the reader thread when it exits due to an error
+    // Pending "reader stopped" message queued by the reader thread. Only touched by the main
+    // thread after joining the reader thread.
+    matlab::engine::FutureResult<std::vector<Array>> m_notifyFuture;
     std::mutex m_eyeDataMutex;      // protects m_latestEyeData, m_haveEyeData, m_readerError
     eye_data_t m_latestEyeData;
     bool m_haveEyeData;
@@ -110,6 +113,14 @@ public:
     ~MexFunction()
     {
         stopReaderThread();
+
+        // If the "reader stopped" message hasn't run yet, cancel it. Otherwise MATLAB
+        // completes it after this MEX file is unloaded and crashes.
+        if (m_notifyFuture.valid() &&
+            m_notifyFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+        {
+            m_notifyFuture.cancel();
+        }
         if (m_connectSocket != INVALID_SOCKET)
         {
             closesocket(m_connectSocket);
@@ -183,30 +194,7 @@ public:
         }
 		else if (s == "read")
 		{
-			if (!m_connected)
-			{
-				merror(std::string("Cannot 'read' - not connected"));
-			}
-
-			// Copy the latest sample saved by the reader thread
-			eye_data_t ed;
-			bool haveData;
-			std::string readerError;
-			{
-				std::lock_guard<std::mutex> lock(m_eyeDataMutex);
-				ed = m_latestEyeData;
-				haveData = m_haveEyeData;
-				readerError = m_readerError;
-			}
-
-			if (!readerError.empty())
-			{
-				merror(std::string("Reader thread stopped: ") + readerError);
-			}
-			if (!haveData)
-			{
-				merror(std::string("No eye data received yet"));
-			}
+			eye_data_t ed = getLatestEyeData(s);
 
 			// Print the contents of the struct
 			std::stringstream out;
@@ -220,6 +208,21 @@ public:
 
 			// Use MATLAB disp to show the string
 			m_matlabPtr->feval(u"disp", 0, std::vector<Array>({ m_factory.createScalar(out.str()) }));
+		}
+		else if (s == "eyepos")
+		{
+			eye_data_t ed = getLatestEyeData(s);
+
+			// Return the sample as a 1x1 struct. Values are doubles so they're easy to use in MATLAB.
+			StructArray result = m_factory.createStructArray({ 1, 1 },
+				{ "status", "calibration_point_number", "frame_number", "pupil_diameter", "gaze_x", "gaze_y" });
+			result[0]["status"] = m_factory.createScalar(static_cast<double>(ed.status));
+			result[0]["calibration_point_number"] = m_factory.createScalar(static_cast<double>(ed.calibration_point_number));
+			result[0]["frame_number"] = m_factory.createScalar(static_cast<double>(ed.frame_number));
+			result[0]["pupil_diameter"] = m_factory.createScalar(static_cast<double>(ed.pupil_diameter));
+			result[0]["gaze_x"] = m_factory.createScalar(static_cast<double>(ed.gaze_x));
+			result[0]["gaze_y"] = m_factory.createScalar(static_cast<double>(ed.gaze_y));
+			outputs[0] = std::move(result);
 		}
 		else if (s == "disconnect")
 		{
@@ -300,6 +303,36 @@ public:
 
         std::cout << "Connected to host." << std::endl;
         return true;
+    };
+
+    // Returns a copy of the latest sample saved by the reader thread. Raises a MATLAB
+    // error (naming the command cmd) if not connected or no sample is available.
+    eye_data_t getLatestEyeData(const std::string& cmd)
+    {
+        if (!m_connected)
+        {
+            merror(std::string("Cannot '") + cmd + "' - not connected");
+        }
+
+        eye_data_t ed;
+        bool haveData;
+        std::string readerError;
+        {
+            std::lock_guard<std::mutex> lock(m_eyeDataMutex);
+            ed = m_latestEyeData;
+            haveData = m_haveEyeData;
+            readerError = m_readerError;
+        }
+
+        if (!readerError.empty())
+        {
+            merror(std::string("Reader thread stopped: ") + readerError);
+        }
+        if (!haveData)
+        {
+            merror(std::string("No eye data received yet"));
+        }
+        return ed;
     };
 
     // Reads one eye_data_t from the socket. Called from the reader thread, so it must
@@ -412,7 +445,7 @@ public:
                     // the call to run on MATLAB's main thread. Don't wait on the result - the
                     // main thread may be blocked in this MEX function.
                     ArrayFactory factory;
-                    m_matlabPtr->fevalAsync(u"fprintf", 0, std::vector<Array>({
+                    m_notifyFuture = m_matlabPtr->fevalAsync(u"fprintf", 0, std::vector<Array>({
                         factory.createScalar("%s\n"),
                         factory.createScalar("asl: reader stopped (" + errmsg + "). Disconnected.") }));
                 }
