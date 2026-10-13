@@ -54,6 +54,12 @@ If the background thread stops because of an error, such as the tracker closing 
 
 Returns the most recent eye data sample as a 1x1 struct, with one field for each of the sample fields listed under `read`. All values are doubles. Like `read`, it does not wait for new data, and it raises an error in the same cases.
 
+### xdat
+
+`asl('xdat', value)`
+
+Converts `value` to `uint16`, as `uint16(value)` does in MATLAB, and sends it to the tracker as 2 bytes, least significant byte first. `value` must be a numeric or logical scalar. `asl('xdat')` sends 0. Raises an error if not connected.
+
 ### disconnect
 
 `asl('disconnect')`

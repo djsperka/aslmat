@@ -34,6 +34,11 @@
 %   All values are doubles. Like 'read', it does not wait for new data,
 %   and it raises an error in the same cases.
 %
+%   ASL('xdat', VALUE) converts VALUE to uint16, as uint16(VALUE) does, and
+%   sends it to the tracker as 2 bytes, least significant byte first.
+%   VALUE must be a numeric or logical scalar. ASL('xdat') sends 0. Raises
+%   an error if not connected.
+%
 %   ASL('disconnect') stops the background thread and closes the
 %   connection. Raises an error if not connected.
 %

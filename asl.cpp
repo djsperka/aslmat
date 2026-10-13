@@ -224,6 +224,39 @@ public:
 			result[0]["gaze_y"] = m_factory.createScalar(static_cast<double>(ed.gaze_y));
 			outputs[0] = std::move(result);
 		}
+		else if (s == "xdat")
+		{
+			if (!m_connected)
+			{
+				merror(std::string("Cannot 'xdat' - not connected"));
+			}
+			if (inputs.size() > 2)
+			{
+				merror(std::string("'xdat' takes at most one additional arg: a numeric scalar"));
+			}
+
+			uint16_t value = 0;
+			if (inputs.size() == 2)
+			{
+				ArrayType t = inputs[1].getType();
+				bool isNumeric = t == ArrayType::DOUBLE || t == ArrayType::SINGLE || t == ArrayType::LOGICAL ||
+					t == ArrayType::INT8 || t == ArrayType::UINT8 || t == ArrayType::INT16 || t == ArrayType::UINT16 ||
+					t == ArrayType::INT32 || t == ArrayType::UINT32 || t == ArrayType::INT64 || t == ArrayType::UINT64;
+				if (!isNumeric || inputs[1].getNumberOfElements() != 1)
+				{
+					merror(std::string("'xdat' arg must be a numeric scalar"));
+				}
+				// Use MATLAB's uint16() so rounding and saturation match MATLAB exactly.
+				TypedArray<uint16_t> v = m_matlabPtr->feval(u"uint16", inputs[1]);
+				value = v[0];
+			}
+
+			std::string errmsg;
+			if (!sendToSocket(reinterpret_cast<const char*>(&value), sizeof(value), errmsg))
+			{
+				merror(errmsg);
+			}
+		}
 		else if (s == "disconnect")
 		{
 			if (!m_connected)
@@ -333,6 +366,28 @@ public:
             merror(std::string("No eye data received yet"));
         }
         return ed;
+    };
+
+    // Writes len bytes to the socket. Safe to call while the reader thread is in recv().
+    bool sendToSocket(const char* buf, size_t len, std::string& errmsg)
+    {
+        if (m_connectSocket == INVALID_SOCKET) {
+            errmsg = "Socket is not connected.";
+            return false;
+        }
+
+        size_t sent = 0;
+        while (sent < len) {
+            int r = send(m_connectSocket, buf + sent, static_cast<int>(len - sent), 0);
+            if (r == SOCKET_ERROR) {
+                std::stringstream out;
+                out << "send failed with error: " << WSAGetLastError();
+                errmsg = out.str();
+                return false;
+            }
+            sent += static_cast<size_t>(r);
+        }
+        return true;
     };
 
     // Reads one eye_data_t from the socket. Called from the reader thread, so it must
