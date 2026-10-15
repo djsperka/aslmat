@@ -305,16 +305,20 @@ public:
             return false;
         }
 
+        // Save the error as soon as a call fails - closesocket() resets WSAGetLastError().
+        int lastError = 0;
         for (ptr = result; ptr != nullptr; ptr = ptr->ai_next)
         {
             m_connectSocket = socket(ptr->ai_family, ptr->ai_socktype, ptr->ai_protocol);
             if (m_connectSocket == INVALID_SOCKET) {
+                lastError = WSAGetLastError();
                 continue;
             }
 
             // Attempt to connect
             int iResult = connect(m_connectSocket, ptr->ai_addr, (int)ptr->ai_addrlen);
             if (iResult == SOCKET_ERROR) {
+                lastError = WSAGetLastError();
                 closesocket(m_connectSocket);
                 m_connectSocket = INVALID_SOCKET;
                 // try next address
@@ -329,7 +333,7 @@ public:
 
         if (m_connectSocket == INVALID_SOCKET) {
             std::stringstream out;
-            out << "Unable to connect to server. Last error: " << WSAGetLastError();
+            out << "Unable to connect to server. Last error: " << lastError;
             merror(out.str());
             return false;
         }
@@ -390,6 +394,33 @@ public:
         return true;
     };
 
+    // Waits until the socket has data to read (or the peer has closed it). Waits in
+    // short steps so the reader thread notices m_stopReader promptly - on Windows,
+    // shutdown() from another thread doesn't reliably wake a blocked recv(), so
+    // without this, stopping the thread could hang until the tracker sent more data.
+    // Returns false and fills in errmsg if stopped or select() fails.
+    bool waitForSocketData(std::string& errmsg)
+    {
+        while (!m_stopReader) {
+            fd_set readSet;
+            FD_ZERO(&readSet);
+            FD_SET(m_connectSocket, &readSet);
+            timeval timeout = { 0, 50000 };     // 50 ms
+            int r = select(0, &readSet, nullptr, nullptr, &timeout);
+            if (r == SOCKET_ERROR) {
+                std::stringstream out;
+                out << "select failed with error: " << WSAGetLastError();
+                errmsg = out.str();
+                return false;
+            }
+            if (r > 0) {
+                return true;
+            }
+        }
+        errmsg = "Reader stopped.";
+        return false;
+    };
+
     // Reads one eye_data_t from the socket. Called from the reader thread, so it must
     // not call into MATLAB - on failure it returns false and fills in errmsg.
     bool readEyeDataFromSocket(eye_data_t& ed, std::string& errmsg)
@@ -404,6 +435,9 @@ public:
         size_t received = 0;
 
         while (received < expected) {
+            if (!waitForSocketData(errmsg)) {
+                return false;
+            }
             int r = recv(m_connectSocket, buf + received, static_cast<int>(expected - received), 0);
             if (r == 0) {
                 errmsg = "Connection closed by peer while reading eye_data_t.";
@@ -448,11 +482,8 @@ public:
     {
         if (!m_readerThread.joinable()) return;
 
+        // The reader thread checks this flag at least every 50 ms (see waitForSocketData).
         m_stopReader = true;
-        // Unblock a pending recv() so the thread can see the stop flag.
-        if (m_connectSocket != INVALID_SOCKET) {
-            shutdown(m_connectSocket, SD_BOTH);
-        }
         m_readerThread.join();
     };
 

@@ -16,15 +16,38 @@ classdef asltracker < handle
 %       'screen_distance'    Distance from the eye to the screen, in the
 %                            same units as 'screen_dimensions'.
 %
-%   Raises an error if an argument is missing or invalid, if a connection
-%   is already open, or if the connection cannot be made.
+%   T = ASLTRACKER(..., 'parport_address', PORT) sets the I/O address of
+%   the parallel port used to send XDAT values to the tracker. The default
+%   is 0x4EFC. The port is opened with IO64Device, so cclab-matlab-tools
+%   must be on the path.
+%
+%   T = ASLTRACKER(..., 'initial_port_value', VALUE) sets the XDAT value
+%   written to the parallel port when the object is created. VALUE is an
+%   integer from 0 to 255. The default is 0.
+%
+%   T = ASLTRACKER(..., 'data_folder', FOLDER) sets the folder where
+%   Eye-Trac writes its .eyd data files. START_RECORDING checks this
+%   folder for a new file. The default is
+%   'C:\Users\Public\Documents\Applied Science Laboratories\Eye-Trac 6 data'.
+%
+%   T = ASLTRACKER(..., 'new_file_time', SECONDS) sets how long
+%   START_RECORDING waits for Eye-Trac to open a new data file before
+%   checking. The default is 0.5.
+%
+%   Raises an error if an argument is missing or invalid, if the parallel
+%   port cannot be opened, if a connection is already open, or if the
+%   connection cannot be made.
+%
+%   XDAT is an 8-bit value written to the parallel port. Bits 0-5 hold the
+%   value from MESSAGE, and bits 6-7 are set by START_RECORDING and cleared
+%   by STOP_RECORDING.
 %
 %   ASLTRACKER methods:
 %       eyepos     - Return the most recent eye data sample as a struct
 %       calibrate  - Follow the tracker through a calibration
-%       message    - Send a message value (bits 0-13 of XDAT)
-%       start_recording - Set the recording bits (14-15 of XDAT) and send
-%       stop_recording  - Clear the recording bits (14-15 of XDAT) and send
+%       message    - Send a message value (bits 0-5 of XDAT)
+%       start_recording - Set the recording bits (6-7 of XDAT) and send
+%       stop_recording  - Clear the recording bits (6-7 of XDAT) and send
 %       disconnect - Close the connection
 %       connect    - Reconnect after DISCONNECT, or after the tracker
 %                    dropped the connection
@@ -50,16 +73,21 @@ classdef asltracker < handle
         ScreenDimensions        % [width height] of the screen's active area, any length unit
         ScreenRect              % Screen rect in pixels, [left top right bottom]
         ScreenDistance          % Eye-to-screen distance, same units as ScreenDimensions
+        DataFolder (1,:) char   % Folder where Eye-Trac writes .eyd data files
+        NewFileTime (1,1) double  % Seconds START_RECORDING waits before checking for a new data file
+        DataFile (1,:) char = ''  % Full path of the data file opened by the last START_RECORDING
     end
 
     properties (Access = private)
         OwnsConnection (1,1) logical = false    % true if this object opened the current connection
-        Xdat (1,1) uint16                       % Value last sent with asl('xdat'). Bits 0-13: message, bits 14-15: recording
+        IODevice                                % IO64Device used to send XDAT over the parallel port
+        Xdat (1,1) uint8                        % Value last sent to the parallel port. Bits 0-5: message, bits 6-7: recording
+        AlwaysInRect (1,1) logical = false      % If set, is_in_rect will always return true
     end
 
     properties (Constant, Access = private)
-        MessageMask = uint16(0x3FFF)            % Xdat bits 0-13
-        RecordingMask = uint16(0xC000)          % Xdat bits 14-15
+        MessageMask = uint8(0x3F)               % Xdat bits 0-5
+        RecordingMask = uint8(0xC0)             % Xdat bits 6-7
     end
 
     methods
@@ -69,6 +97,10 @@ classdef asltracker < handle
                 options.screen_dimensions (1,2) double {mustBePositive, mustBeFinite}
                 options.screen_rect (1,4) {mustBeNumeric, mustBeReal, mustBeFinite, mustBeValidRect}
                 options.screen_distance (1,1) double {mustBePositive, mustBeFinite}
+                options.parport_address (1,1) {mustBeNumeric, mustBeInteger, mustBeNonnegative} = 0x4EFC
+                options.initial_port_value (1,1) {mustBeNumeric, mustBeInteger, mustBeInRange(options.initial_port_value, 0, 255)} = 0
+                options.data_folder (1,:) char {mustBeNonempty} = 'C:\Users\Public\Documents\Applied Science Laboratories\Eye-Trac 6 data'
+                options.new_file_time (1,1) double {mustBeNonnegative, mustBeFinite} = 0.5
             end
             required = {'address', 'screen_dimensions', 'screen_rect', 'screen_distance'};
             missing = required(~isfield(options, required));
@@ -81,7 +113,11 @@ classdef asltracker < handle
             obj.ScreenDimensions = options.screen_dimensions;
             obj.ScreenRect = double(options.screen_rect);
             obj.ScreenDistance = options.screen_distance;
-            obj.Xdat = uint16(0);
+            obj.DataFolder = options.data_folder;
+            obj.NewFileTime = options.new_file_time;
+            obj.IODevice = IO64Device(double(options.parport_address));
+            obj.Xdat = uint8(options.initial_port_value);
+            obj.sendXdat();
 
             obj.connect();
         end
@@ -121,6 +157,33 @@ classdef asltracker < handle
                     end
                 end
                 pause(0.01);
+            end
+        end
+
+        function [tf] = is_in_rect(obj, rect)
+            %is_in_rect Is current eye pos in the rect? Returns 1/0.
+
+            arguments
+                obj
+                rect (1,4) {mustBeNumeric, mustBeReal, mustBeFinite, mustBeValidRect}
+            end
+
+            if obj.AlwaysInRect
+                tf = true;
+            else
+                s = obj.eyepos();
+                x = s.gaze_x;
+                y = s.gaze_y;
+                tf = IsInRect(x, y, rect);
+            end
+        end
+
+        function always_in_rect(obj, bAlways)
+            obj.AlwaysInRect = bAlways;
+            if bAlways
+                fprintf('WARNING: eyetracker is in "always looking" mode! Actual eye position is ignored.\n');
+            else
+                fprintf('WARNING: "always looking" mode turned off! Actual eye position is used.\n');
             end
         end
 
@@ -196,37 +259,65 @@ classdef asltracker < handle
         function message(obj, value)
             %MESSAGE Send a message value to the tracker.
             %   T.MESSAGE(VALUE) rounds VALUE to an integer and puts its
-            %   bits 0-13 in bits 0-13 of the XDAT value, then sends XDAT
-            %   to the tracker. Higher bits of VALUE are ignored, and bits
-            %   14-15 of XDAT (the recording bits) are unchanged. Negative
-            %   values are treated as two's complement.
+            %   bits 0-5 in bits 0-5 of the XDAT value, then writes XDAT to
+            %   the parallel port. Higher bits of VALUE are ignored, and
+            %   bits 6-7 of XDAT (the recording bits) are unchanged.
+            %   Negative values are treated as two's complement.
             arguments
                 obj
                 value (1,1) {mustBeNumeric, mustBeReal, mustBeFinite}
             end
             % int64 rounds; typecast keeps the two's complement bits of negative values.
             bits = typecast(int64(value), 'uint64');
-            low14 = uint16(bitand(bits, uint64(obj.MessageMask)));
-            obj.Xdat = bitor(bitand(obj.Xdat, obj.RecordingMask), low14);
-            asl('xdat', obj.Xdat);
+            low6 = uint8(bitand(bits, uint64(obj.MessageMask)));
+            obj.Xdat = bitor(bitand(obj.Xdat, obj.RecordingMask), low6);
+            obj.sendXdat();
         end
 
         function start_recording(obj)
             %START_RECORDING Tell the tracker to start recording.
-            %   T.START_RECORDING() sets bits 14 and 15 of the XDAT value,
-            %   leaving the message bits unchanged, and sends XDAT to the
-            %   tracker.
+            %   T.START_RECORDING() sets bits 6 and 7 of the XDAT value,
+            %   leaving the message bits unchanged, and writes XDAT to the
+            %   parallel port. It then waits T.NewFileTime seconds and
+            %   checks that Eye-Trac has opened a new .eyd file in
+            %   T.DataFolder. The new file's full path is saved in
+            %   T.DataFile.
+            %
+            %   Raises an error if T.DataFolder doesn't exist (before
+            %   anything is sent), or if no new file appears. In the
+            %   second case the recording bits have already been sent, so
+            %   call STOP_RECORDING before trying again.
+            if ~isfolder(obj.DataFolder)
+                error('asltracker:noDataFolder', ...
+                    'Data folder does not exist: %s', obj.DataFolder);
+            end
+            obj.DataFile = '';
+            before = obj.listDataFiles();
+
             obj.Xdat = bitor(obj.Xdat, obj.RecordingMask);
-            asl('xdat', obj.Xdat);
+            obj.sendXdat();
+
+            pause(obj.NewFileTime);
+            after = obj.listDataFiles();
+            [newNames, idx] = setdiff({after.name}, {before.name});
+            if isempty(newNames)
+                error('asltracker:noNewDataFile', ...
+                    'No new data file appeared in %s within %g seconds of starting recording.', ...
+                    obj.DataFolder, obj.NewFileTime);
+            end
+            % If more than one appeared, take the newest.
+            newFiles = after(idx);
+            [~, newest] = max([newFiles.datenum]);
+            obj.DataFile = fullfile(obj.DataFolder, newFiles(newest).name);
         end
 
         function stop_recording(obj)
             %STOP_RECORDING Tell the tracker to stop recording.
-            %   T.STOP_RECORDING() clears bits 14 and 15 of the XDAT value,
-            %   leaving the message bits unchanged, and sends XDAT to the
-            %   tracker.
+            %   T.STOP_RECORDING() clears bits 6 and 7 of the XDAT value,
+            %   leaving the message bits unchanged, and writes XDAT to the
+            %   parallel port.
             obj.Xdat = bitand(obj.Xdat, obj.MessageMask);
-            asl('xdat', obj.Xdat);
+            obj.sendXdat();
         end
 
         function disconnect(obj)
@@ -246,6 +337,20 @@ classdef asltracker < handle
                 catch
                 end
             end
+        end
+    end
+
+    methods (Access = private)
+        function sendXdat(obj)
+            % XDAT goes over the parallel port; sending it over TCP/IP
+            % (asl('xdat')) doesn't work with the tracker.
+            obj.IODevice.outp(double(obj.Xdat));
+        end
+
+        function files = listDataFiles(obj)
+            % Eye-Trac data files in DataFolder.
+            files = dir(fullfile(obj.DataFolder, '*.eyd'));
+            files = files(~[files.isdir]);
         end
     end
 end
