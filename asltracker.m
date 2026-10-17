@@ -1,7 +1,6 @@
 classdef asltracker < handle
 %ASLTRACKER Connection to an ASL eye tracker.
-%   T = ASLTRACKER('address', ADDR, 'screen_dimensions', DIMS,
-%       'screen_rect', RECT, 'screen_distance', DIST) creates a tracker
+%   T = ASLTRACKER('address', ADDR, 'screen_rect', RECT) creates a tracker
 %   object and connects to the ASL eye tracker. Once connected, the asl
 %   MEX file reads eye data in the background at 120Hz. All arguments are
 %   required:
@@ -9,12 +8,8 @@ classdef asltracker < handle
 %       'address'            Tracker address, a char array of the form
 %                            'addr:port', where addr is an IP address or
 %                            hostname.
-%       'screen_dimensions'  [width height] of the screen's active area.
-%                            Any length unit, e.g. cm.
 %       'screen_rect'        Screen rect in pixels, [left top right bottom],
 %                            as returned by Screen('Rect', window).
-%       'screen_distance'    Distance from the eye to the screen, in the
-%                            same units as 'screen_dimensions'.
 %
 %   T = ASLTRACKER(..., 'parport_address', PORT) sets the I/O address of
 %   the parallel port used to send XDAT values to the tracker. The default
@@ -60,8 +55,7 @@ classdef asltracker < handle
 %
 %   Example:
 %       t = asltracker('address', '128.120.140.228:51000', ...
-%           'screen_dimensions', [52 29.3], 'screen_rect', [0 0 1920 1080], ...
-%           'screen_distance', 57);
+%           'screen_rect', [0 0 1920 1080]);
 %       s = t.eyepos(2);    % wait up to 2 s for the first sample
 %       fprintf('gaze = (%g, %g)\n', s.gaze_x, s.gaze_y);
 %       t.disconnect();
@@ -70,12 +64,12 @@ classdef asltracker < handle
 
     properties (SetAccess = private)
         Address (1,:) char      % Tracker address, 'addr:port'
-        ScreenDimensions        % [width height] of the screen's active area, any length unit
         ScreenRect              % Screen rect in pixels, [left top right bottom]
-        ScreenDistance          % Eye-to-screen distance, same units as ScreenDimensions
         DataFolder (1,:) char   % Folder where Eye-Trac writes .eyd data files
         NewFileTime (1,1) double  % Seconds START_RECORDING waits before checking for a new data file
         DataFile (1,:) char = ''  % Full path of the data file opened by the last START_RECORDING
+        GazeToPixels (2,2)      % Convert gaze coordinates to pixels with this
+        GazeOffset (1,2)        % offset of gaze position in pixel coords
     end
 
     properties (Access = private)
@@ -88,21 +82,20 @@ classdef asltracker < handle
     properties (Constant, Access = private)
         MessageMask = uint8(0x3F)               % Xdat bits 0-5
         RecordingMask = uint8(0xC0)             % Xdat bits 6-7
+        GazeSystemDimensions = [260, 255]       % Size of ASL gaze coord system
     end
 
     methods
         function obj = asltracker(options)
             arguments
                 options.address (1,:) char {mustBeNonempty}
-                options.screen_dimensions (1,2) double {mustBePositive, mustBeFinite}
                 options.screen_rect (1,4) {mustBeNumeric, mustBeReal, mustBeFinite, mustBeValidRect}
-                options.screen_distance (1,1) double {mustBePositive, mustBeFinite}
                 options.parport_address (1,1) {mustBeNumeric, mustBeInteger, mustBeNonnegative} = 0x4EFC
                 options.initial_port_value (1,1) {mustBeNumeric, mustBeInteger, mustBeInRange(options.initial_port_value, 0, 255)} = 0
                 options.data_folder (1,:) char {mustBeNonempty} = 'C:\Users\Public\Documents\Applied Science Laboratories\Eye-Trac 6 data'
                 options.new_file_time (1,1) double {mustBeNonnegative, mustBeFinite} = 0.5
             end
-            required = {'address', 'screen_dimensions', 'screen_rect', 'screen_distance'};
+            required = {'address', 'screen_rect'};
             missing = required(~isfield(options, required));
             if ~isempty(missing)
                 error('asltracker:missingArgument', ...
@@ -110,13 +103,14 @@ classdef asltracker < handle
                     strjoin(required, ', '), strjoin(missing, ', '));
             end
             obj.Address = options.address;
-            obj.ScreenDimensions = options.screen_dimensions;
             obj.ScreenRect = double(options.screen_rect);
-            obj.ScreenDistance = options.screen_distance;
             obj.DataFolder = options.data_folder;
             obj.NewFileTime = options.new_file_time;
             obj.IODevice = IO64Device(double(options.parport_address));
             obj.Xdat = uint8(options.initial_port_value);
+            obj.GazeToPixels = [RectWidth(obj.ScreenRect)/obj.GazeSystemDimensions(1), 0; 0, RectHeight(obj.ScreenRect)/obj.GazeSystemDimensions(2)];
+            obj.GazeOffset = obj.ScreenRect(1:2);
+
             obj.sendXdat();
 
             obj.connect();
@@ -138,6 +132,7 @@ classdef asltracker < handle
             %   S = T.EYEPOS() returns the most recent sample as a struct
             %   with fields status, calibration_point_number, frame_number,
             %   pupil_diameter, gaze_x and gaze_y. All values are doubles.
+            %   The gaze coordinates are converted to screen pixels.
             %
             %   S = T.EYEPOS(TIMEOUT) waits up to TIMEOUT seconds for the
             %   first sample to arrive after connecting. The default is 0,
@@ -150,6 +145,9 @@ classdef asltracker < handle
             while true
                 try
                     s = asl('eyepos');
+                    gazePixels = [s.gaze_x, s.gaze_y] * obj.GazeToPixels + obj.GazeOffset;
+                    s.gaze_x = gazePixels(1);
+                    s.gaze_y = gazePixels(2);
                     return;
                 catch e
                     if ~contains(e.message, 'No eye data received yet') || toc(t) >= timeout
@@ -227,20 +225,13 @@ classdef asltracker < handle
                 s = obj.eyepos();
             end
 
-            % matrix to scale gaze coordinates to pixel coordinates
-            screenWidthPixels = RectWidth(obj.ScreenRect);
-            screenHeightPixels = RectHeight(obj.ScreenRect);
-            % Convert normalized gaze coordinates to screen pixels.
-            gazeToPixels = [screenWidthPixels/260, 0; 0, screenHeightPixels/255];
-            gazeOffset = obj.ScreenRect(1:2);
-
             % Follow the calibration. The first point counts as a change.
             currentPoint = 0;
             while s.calibration_point_number ~= 0
                 if s.calibration_point_number ~= currentPoint
                     currentPoint = s.calibration_point_number;
                     targetPosition = [s.gaze_x, s.gaze_y];
-                    targetPixels = gazeToPixels * targetPosition(:) + gazeOffset(:);
+                    targetPixels = obj.GazeToPixels * targetPosition(:) + obj.GazeOffset(:);
                     fprintf('cal pt %d: %f, %f --> %f, %f\n', currentPoint, s.gaze_x, s.gaze_y, targetPixels(1), targetPixels(2));
 
                     % Move the fixation point to the target and show it.
