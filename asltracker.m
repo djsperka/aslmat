@@ -43,6 +43,7 @@ classdef asltracker < handle
 %       message    - Send a message value (bits 0-5 of XDAT)
 %       start_recording - Set the recording bits (6-7 of XDAT) and send
 %       stop_recording  - Clear the recording bits (6-7 of XDAT) and send
+%       receive_file    - Return the size and path of the latest data file
 %       disconnect - Close the connection
 %       connect    - Reconnect after DISCONNECT, or after the tracker
 %                    dropped the connection
@@ -338,6 +339,30 @@ classdef asltracker < handle
         function offline(obj)
             %OFFLINE Alternate name for STOP_RECORDING.
             obj.stop_recording();
+        end
+
+        function [nbytes, filename] = receive_file(obj, varargin)
+            %RECEIVE_FILE Return the size and path of the latest data file.
+            %   NBYTES = T.RECEIVE_FILE(...) returns the size in bytes of
+            %   the data file opened by the last START_RECORDING
+            %   (T.DataFile). Any arguments are ignored.
+            %
+            %   [NBYTES, FILENAME] = T.RECEIVE_FILE(...) also returns the
+            %   full path of that file.
+            %
+            %   Raises an error if START_RECORDING hasn't found a data
+            %   file, or if the file no longer exists.
+            if isempty(obj.DataFile)
+                error('asltracker:noDataFile', ...
+                    'No data file. Call start_recording first.');
+            end
+            info = dir(obj.DataFile);
+            if isempty(info)
+                error('asltracker:dataFileMissing', ...
+                    'Data file does not exist: %s', obj.DataFile);
+            end
+            nbytes = info.bytes;
+            filename = obj.DataFile;
         end
 
         function disconnect(obj)
