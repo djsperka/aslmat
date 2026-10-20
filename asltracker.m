@@ -127,7 +127,7 @@ classdef asltracker < handle
             obj.OwnsConnection = true;
         end
 
-        function s = eyepos(obj, timeout)
+        function s = eyepos(obj, timeout, pixelCoords)
             %EYEPOS Return the most recent eye data sample.
             %   S = T.EYEPOS() returns the most recent sample as a struct
             %   with fields status, calibration_point_number, frame_number,
@@ -140,14 +140,17 @@ classdef asltracker < handle
             arguments
                 obj
                 timeout (1,1) double {mustBeNonnegative} = 0
+                pixelCoords (1,1) {mustBeNumericOrLogical} = 1
             end
             t = tic;
             while true
                 try
                     s = asl('eyepos');
-                    gazePixels = [s.gaze_x, s.gaze_y] * obj.GazeToPixels + obj.GazeOffset;
-                    s.gaze_x = gazePixels(1);
-                    s.gaze_y = gazePixels(2);
+                    if pixelCoords
+                        gazePixels = [s.gaze_x, s.gaze_y] * obj.GazeToPixels + obj.GazeOffset;
+                        s.gaze_x = gazePixels(1);
+                        s.gaze_y = gazePixels(2);
+                    end
                     return;
                 catch e
                     if ~contains(e.message, 'No eye data received yet') || toc(t) >= timeout
@@ -222,7 +225,7 @@ classdef asltracker < handle
                         'Calibration did not start within %g seconds.', timeout);
                 end
                 pause(period);
-                s = obj.eyepos();
+                s = obj.eyepos(0, 0);
             end
 
             % Follow the calibration. The first point counts as a change.
@@ -241,7 +244,7 @@ classdef asltracker < handle
                     Screen('Flip', window);
                 end
                 pause(period);
-                s = obj.eyepos();
+                s = obj.eyepos(0, 0);
             end
             % leave a blank screen when done
             Screen('Flip', window);
