@@ -47,3 +47,6 @@ Datapixx('SetDisplayGammaMode', 2); %1 = linear; 2 = 2.2
 Datapixx('RegWr');        
 
 Datapixx('Close');
+sca
+tracker.disconnect();
+clear tracker;
