@@ -127,16 +127,32 @@ classdef asltracker < handle
             obj.OwnsConnection = true;
         end
 
-        function s = eyepos(obj, timeout, pixelCoords)
+        function varargout = eyepos(obj, timeout, pixelCoords)
             %EYEPOS Return the most recent eye data sample.
             %   S = T.EYEPOS() returns the most recent sample as a struct
             %   with fields status, calibration_point_number, frame_number,
             %   pupil_diameter, gaze_x and gaze_y. All values are doubles.
-            %   The gaze coordinates are converted to screen pixels.
+            %   The gaze coordinates are converted to screen pixels by 
+            %   default(see below).
             %
             %   S = T.EYEPOS(TIMEOUT) waits up to TIMEOUT seconds for the
             %   first sample to arrive after connecting. The default is 0,
             %   which raises an error at once if no sample has arrived yet.
+            %
+            %   S = T.EYEPOS(TIMEOUT, USEPIXELCOORDS) waits up to TIMEOUT
+            %   seconds for the first sample to arrive after connecting. If
+            %   USEPIXELCOORDS is true/1 (default), the gaze position 
+            %   returned is converted to screen pixels (based on the most
+            %   recent calibration). If USEPIXELCOORDS is 0/false, the gaze
+            %   position returned is in the ASL gaze coordinate system. The
+            %   latter is appropriate for calibration, where the gaze
+            %   position returned is the position of the calibration dot in
+            %   ASL coords.
+            %
+            %   [GAZE_X, GAZE_Y, TF] = T.EYEPOS(...) returns the gaze
+            %   coordinates as separate values instead of a struct. TF is
+            %   a logical value that is always true.
+            %
             arguments
                 obj
                 timeout (1,1) double {mustBeNonnegative} = 0
@@ -150,6 +166,11 @@ classdef asltracker < handle
                         gazePixels = [s.gaze_x, s.gaze_y] * obj.GazeToPixels + obj.GazeOffset;
                         s.gaze_x = gazePixels(1);
                         s.gaze_y = gazePixels(2);
+                    end
+                    if nargout <= 1
+                        varargout = {s};
+                    else
+                        varargout = {s.gaze_x, s.gaze_y, true};
                     end
                     return;
                 catch e
@@ -312,6 +333,11 @@ classdef asltracker < handle
             %   parallel port.
             obj.Xdat = bitand(obj.Xdat, obj.MessageMask);
             obj.sendXdat();
+        end
+
+        function offline(obj)
+            %OFFLINE Alternate name for STOP_RECORDING.
+            obj.stop_recording();
         end
 
         function disconnect(obj)
